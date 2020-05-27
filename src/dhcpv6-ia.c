@@ -783,6 +783,16 @@ static void valid_until_cb(struct uloop_timeout *event)
 	uloop_timeout_set(event, 1000);
 }
 
+static uint32_t leasetime_remaining(uint32_t leasetime, uint32_t nowtime)
+{
+	if (leasetime == UINT32_MAX)
+		return UINT32_MAX;
+	else if (leasetime < nowtime)
+		return 0;
+	else
+		return leasetime - nowtime;
+}
+
 static size_t build_ia(uint8_t *buf, size_t buflen, uint16_t status,
 		const struct dhcpv6_ia_hdr *ia, struct dhcp_assignment *a,
 		struct interface *iface, bool request)
@@ -821,93 +831,93 @@ static size_t build_ia(uint8_t *buf, size_t buflen, uint16_t status,
 	}
 
 	if (a) {
-		uint32_t leasetime;
-
-		if (a->leasetime)
-			leasetime = a->leasetime;
-		else
-			leasetime = iface->dhcpv4_leasetime;
-
-		uint32_t pref = leasetime;
-		uint32_t valid = leasetime;
-
 		struct odhcpd_ipaddr *addrs = (a->managed) ? a->managed : iface->addr6;
 		size_t addrlen = (a->managed) ? (size_t)a->managed_size : iface->addr6_len;
-		size_t m = get_preferred_addr(addrs, addrlen);
 
-		for (size_t i = 0; i < addrlen; ++i) {
-			uint32_t prefix_pref = addrs[i].preferred;
-			uint32_t prefix_valid = addrs[i].valid;
+		size_t most = get_preferred_addr(addrs, addrlen);
+		if (valid_addr(&addrs[most], now)) {
 
-			if (!valid_addr(&addrs[i], now))
-				continue;
+			uint32_t leasetime;
+			if (a->leasetime)
+				leasetime = a->leasetime;
+			else
+				leasetime = iface->dhcpv4_leasetime;
 
-			if (prefix_pref != UINT32_MAX)
-				prefix_pref -= now;
+			uint32_t most_pref = leasetime_remaining(addrs[most].preferred, now);
+			uint32_t valid_until = leasetime;
 
-			if (prefix_valid != UINT32_MAX)
-				prefix_valid -= now;
+			for (size_t i = 0; i < addrlen; ++i) {
+				uint32_t preferred = addrs[i].preferred;
+				uint32_t valid = addrs[i].valid;
 
-			if (a->length < 128) {
-				struct dhcpv6_ia_prefix o_ia_p = {
-					.type = htons(DHCPV6_OPT_IA_PREFIX),
-					.len = htons(sizeof(o_ia_p) - 4),
-					.preferred = htonl(prefix_pref),
-					.valid = htonl(prefix_valid),
-					.prefix = (a->managed_size) ? addrs[i].prefix : a->length,
-					.addr = addrs[i].addr.in6,
-				};
-
-				o_ia_p.addr.s6_addr32[1] |= htonl(a->assigned);
-				o_ia_p.addr.s6_addr32[2] = o_ia_p.addr.s6_addr32[3] = 0;
-
-				if ((a->assigned == 0 && a->managed_size == 0) ||
-						!valid_prefix_length(a, addrs[i].prefix))
+				// skip deprecated addr
+				if (!valid_addr(&addrs[i], now))
 					continue;
 
-				if (buflen < ia_len + sizeof(o_ia_p))
-					return 0;
+				preferred = leasetime_remaining(preferred, now);
+				valid = leasetime_remaining(valid, now);
 
-				memcpy(buf + ia_len, &o_ia_p, sizeof(o_ia_p));
-				ia_len += sizeof(o_ia_p);
-			} else {
-				struct dhcpv6_ia_addr o_ia_a = {
-					.type = htons(DHCPV6_OPT_IA_ADDR),
-					.len = htons(sizeof(o_ia_a) - 4),
-					.addr = addrs[i].addr.in6,
-					.preferred = htonl(prefix_pref),
-					.valid = htonl(prefix_valid)
-				};
+				if (a->length < 128) {
+					struct dhcpv6_ia_prefix o_ia_p = {
+						.type = htons(DHCPV6_OPT_IA_PREFIX),
+						.len = htons(sizeof(o_ia_p) - 4),
+						.addr = addrs[i].addr.in6,
+						.preferred = htonl(preferred),
+						.valid = htonl(valid),
+						.prefix = (a->managed_size) ? addrs[i].prefix : a->length,
+					};
 
-				o_ia_a.addr.s6_addr32[3] = htonl(a->assigned);
+					o_ia_p.addr.s6_addr32[1] |= htonl(a->assigned);
+					o_ia_p.addr.s6_addr32[2] = o_ia_p.addr.s6_addr32[3] = 0;
 
-				if (!ADDR_ENTRY_VALID_IA_ADDR(iface, i, m, addrs) ||
-						a->assigned == 0)
-					continue;
+					if ((a->assigned == 0 && a->managed_size == 0) ||
+							!valid_prefix_length(a, addrs[i].prefix))
+						continue;
 
-				if (buflen < ia_len + sizeof(o_ia_a))
-					return 0;
+					if (buflen < ia_len + sizeof(o_ia_p))
+						return 0;
 
-				memcpy(buf + ia_len, &o_ia_a, sizeof(o_ia_a));
-				ia_len += sizeof(o_ia_a);
+					memcpy(buf + ia_len, &o_ia_p, sizeof(o_ia_p));
+					ia_len += sizeof(o_ia_p);
+				} else {
+					struct dhcpv6_ia_addr o_ia_a = {
+						.type = htons(DHCPV6_OPT_IA_ADDR),
+						.len = htons(sizeof(o_ia_a) - 4),
+						.addr = addrs[i].addr.in6,
+						.preferred = htonl(preferred),
+						.valid = htonl(valid),
+					};
+
+					o_ia_a.addr.s6_addr32[3] = htonl(a->assigned);
+
+					if (!ADDR_ENTRY_VALID_IA_ADDR(iface, i, m, addrs) ||
+							a->assigned == 0)
+						continue;
+
+					if (buflen < ia_len + sizeof(o_ia_a))
+						return 0;
+
+					memcpy(buf + ia_len, &o_ia_a, sizeof(o_ia_a));
+					ia_len += sizeof(o_ia_a);
+				}
+
+				/* Calculate T1 / T2 based on non-deprecated addresses */
+				if (prefix_pref > 0) {
+					if (prefix_pref < pref)
+						pref = prefix_pref;
+
+					if (prefix_valid < valid)
+						valid = prefix_valid;
+				}
 			}
 
-			/* Calculate T1 / T2 based on non-deprecated addresses */
-			if (prefix_pref > 0) {
-				if (prefix_pref < pref)
-					pref = prefix_pref;
+			if (!INFINITE_VALID(a->valid_until))
+				/* UINT32_MAX is considered as infinite leasetime */
+				a->valid_until = (leasetime == UINT32_MAX) ? 0 : valid + now;
 
-				if (prefix_valid < valid)
-					valid = prefix_valid;
-			}
+			o_ia.t1 = htonl((pref == UINT32_MAX) ? pref : pref * 5 / 10);
+			o_ia.t2 = htonl((pref == UINT32_MAX) ? pref : pref * 8 / 10);
 		}
-
-		if (!INFINITE_VALID(a->valid_until))
-			/* UINT32_MAX is considered as infinite leasetime */
-			a->valid_until = (valid == UINT32_MAX) ? 0 : valid + now;
-
-		o_ia.t1 = htonl((pref == UINT32_MAX) ? pref : pref * 5 / 10);
-		o_ia.t2 = htonl((pref == UINT32_MAX) ? pref : pref * 8 / 10);
 
 		if (!o_ia.t1)
 			o_ia.t1 = htonl(1);

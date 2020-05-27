@@ -346,9 +346,13 @@ static void set_config(struct uci_section *s)
 	}
 }
 
-static double parse_leasetime(struct blob_attr *c) {
+static uint32_t parse_leasetime(struct blob_attr *c) {
 	char *val = blobmsg_get_string(c), *endptr = NULL;
-	double time = strcmp(val, "infinite") ? strtod(val, &endptr) : UINT32_MAX;
+
+	if (strcmp(val, "infinite"))
+		return UINT32_MAX;
+	
+	uint32_t time = strtoul(val, &endptr, 10);
 
 	if (time && endptr && endptr[0]) {
 		if (endptr[0] == 's')
@@ -367,11 +371,13 @@ static double parse_leasetime(struct blob_attr *c) {
 
 	if (time < 60)
 		time = 60;
+	else if (time > INT32_MAX)
+		time = INT32_MAX;
 
 	return time;
 
 err:
-	return -1;
+	return 0;
 }
 
 static void free_lease(struct lease *l)
@@ -435,8 +441,8 @@ static int set_lease(struct uci_section *s)
 	}
 
 	if ((c = tb[LEASE_ATTR_LEASETIME])) {
-		double time = parse_leasetime(c);
-		if (time < 0)
+		uint32_t time = parse_leasetime(c);
+		if (time == 0)
 			goto err;
 
 		l->leasetime = time;
@@ -539,8 +545,8 @@ int config_parse_interface(void *data, size_t len, const char *name, bool overwr
 		iface->no_dynamic_dhcp = !blobmsg_get_bool(c);
 
 	if ((c = tb[IFACE_ATTR_LEASETIME])) {
-		double time = parse_leasetime(c);
-		if (time < 0)
+		uint32_t time = parse_leasetime(c);
+		if (time == 0)
 			goto err;
 
 		iface->dhcpv4_leasetime = time;
